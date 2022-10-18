@@ -38,41 +38,13 @@ import java.util.Arrays;
 @Component
 public class EnvCheckTool {
 
-    /**
-     * 全局环境变量的JAVA_HOME，被appium使用，绝大多数情况下路径都能反映版本
-     */
-    public static String javaPath = "unknown \n";
-
-    /**
-     * 运行时的Java Version，假如上面的JAVA_HOME指向JDK 16，而启动的时候用 /{path}/JDK 17/java -jar 启动agent
-     * 则此处javaVersion=JDK 17
-     */
-    public static String javaVersion = "unknown \n";
-
     public static String system;
     public static String sdkPath = "unknown \n";
     public static String adbPath = "unknown \n";
     public static String adbVersion = "unknown \n";
-    public static String nodePath = "unknown \n";
-    public static String nodeVersion = "unknown \n";
-    public static String npmPath = "unknown \n";
-    public static String npmVersion = "unknown \n";
-    public static String appiumPath = "unknown \n";
-    public static String appiumVersion = "unknown \n";
-    public static String adbKitPath = "unknown \n";
-    public static String adbKitVersion = "unknown \n";
 
-    @Value("${modules.webview.chrome-driver-path}")
-    public String chromeDriverPath;
     @Value("${modules.android.enable}")
     public boolean androidEnAble;
-    @Value("${modules.android.use-adbkit}")
-    public boolean adbkitEnAble;
-    @Value("${modules.appium.enable}")
-    public boolean appiumEnAble;
-    @Value("${modules.webview.enable}")
-    public boolean webviewEnAble;
-    public static String chromeDriverVersion;
 
     static {
         system = System.getProperty("os.name").toLowerCase();
@@ -85,21 +57,6 @@ public class EnvCheckTool {
             if (androidEnAble) {
                 checkSDK();
                 checkAdb();
-            }
-            //adbkit和appium依赖node服务
-            if (adbkitEnAble || appiumEnAble) {
-                checkNode();
-                checkNpm();
-            }
-            if (appiumEnAble) {
-                checkJavaHome();
-                checkAppium();
-            }
-            if (adbkitEnAble) {
-                checkAdbKit();
-            }
-            if (webviewEnAble) {
-                checkChromeDriver();
             }
             checkFiles();
         } catch (Exception e) {
@@ -119,7 +76,6 @@ public class EnvCheckTool {
      */
     public void checkFiles() {
         String type = "Check local resource";
-        File webview = new File("webview");
         File config = new File("config/application-sonic-agent.yml");
         File mini = new File("mini");
         File plugins = new File("plugins");
@@ -131,53 +87,14 @@ public class EnvCheckTool {
                 e.printStackTrace();
             }
         }
-        if (webview.exists()
-                && config.exists()
+        if (config.exists()
                 && mini.exists()
                 && plugins.exists()) {
             printPass(type);
         } else {
             printFail(type);
-            throw new RuntimeException("提示：请确保当前目录下有webview、config(内含application-prod.yml)、mini、plugins文件夹");
+            throw new RuntimeException("提示：请确保当前目录下有config(内含application-sonic-agent.yml)、mini、plugins文件夹");
         }
-    }
-
-    /**
-     * 检查java环境
-     */
-    public void checkJavaHome() {
-        String type = "Check JAVA_HOME Path";
-        javaPath = System.getenv("JAVA_HOME");
-        javaVersion = System.getProperty("java.version");
-        if (!StringUtils.hasText(javaPath)) {
-            System.out.println("系统变量【JAVA_HOME】返回值为空！");
-            printFail(type);
-            throw new RuntimeException("提示：可前往https://www.oracle.com/java/technologies/downloads/下载jdk并设置JAVA_HOME系统变量");
-        }
-        printPass(type);
-    }
-
-    /**
-     * 检查chromedriver环境
-     */
-    public void checkChromeDriver() throws IOException, InterruptedException {
-        String type = "Check chromeDriver env";
-        if (system.contains("win")) {
-            chromeDriverPath = "\"" + chromeDriverPath + "\"";
-        } else {
-            chromeDriverPath = StringUtils.replace(chromeDriverPath, " ", "\\ ");
-        }
-        String commandStr = chromeDriverPath + " -v";
-        try {
-            chromeDriverVersion = exeCmd(false, commandStr);
-        } catch (RuntimeException e) {
-            System.out.println(e.getMessage());
-            printFail(type);
-            throw new RuntimeException(String.format("提示：如果需要修改路径，可以修改config文件夹里application-prod.yml文件里的对应内容。" +
-                    "如果未安装，可前往http://npm.taobao.org/mirrors/chromedriver/下载" +
-                    "与Agent的谷歌浏览器版本对应的driver到谷歌浏览器安装目录下（谷歌浏览器地址栏输入chrome://version可看到安装目录）"));
-        }
-        printPass(type);
     }
 
     /**
@@ -208,74 +125,6 @@ public class EnvCheckTool {
             System.out.println(e.getMessage());
             printFail(type);
             throw new RuntimeException(String.format("提示：请确保安卓SDK目录下的platform-tools有adb工具"));
-        }
-        printPass(type);
-    }
-
-    /**
-     * 检查adbkit环境
-     */
-    public void checkAdbKit() throws IOException, InterruptedException {
-        String type = "Check adbkit env (Next version deprecated) ";
-        String commandStr = "adbkit -V";
-        try {
-            adbKitPath = findCommandPath("adbkit");
-            adbKitVersion = exeCmd(false, commandStr);
-        } catch (RuntimeException e) {
-            System.out.println(e.getMessage());
-            printFail(type);
-            throw new RuntimeException(String.format("提示：可使用[npm i -g adbkit]安装"));
-        }
-        printPass(type);
-    }
-
-    /**
-     * 检查node环境
-     */
-    public void checkNode() throws IOException, InterruptedException {
-        String type = "Check Node env (Next version deprecated) ";
-        String commandStr = "node -v";
-        try {
-            nodePath = findCommandPath("node");
-            nodeVersion = exeCmd(false, commandStr);
-        } catch (RuntimeException e) {
-            System.out.println(e.getMessage());
-            printFail(type);
-            throw new RuntimeException(String.format("提示：可前往https://nodejs.org/zh-cn/下载"));
-        }
-        printPass(type);
-    }
-
-    /**
-     * 检查npm环境
-     */
-    public void checkNpm() throws IOException, InterruptedException {
-        String type = "Check npm env (Next version deprecated) ";
-        String commandStr = "npm -v";
-        try {
-            npmPath = findCommandPath("npm");
-            npmVersion = exeCmd(false, commandStr);
-        } catch (RuntimeException e) {
-            System.out.println(e.getMessage());
-            printFail(type);
-            throw new RuntimeException(String.format("提示：可前往https://nodejs.org/zh-cn/下载"));
-        }
-        printPass(type);
-    }
-
-    /**
-     * 检查appium环境
-     */
-    public void checkAppium() throws IOException, InterruptedException {
-        String type = "Check Appium env (Next version deprecated) ";
-        String commandStr = "appium -v";
-        try {
-            appiumPath = findCommandPath("appium");
-            appiumVersion = exeCmd(false, commandStr);
-        } catch (RuntimeException e) {
-            System.out.println(e.getMessage());
-            printFail(type);
-            throw new RuntimeException(String.format("提示：可使用[npm i -g appium]命令安装"));
         }
         printPass(type);
     }
@@ -359,21 +208,9 @@ public class EnvCheckTool {
 
     @Override
     public String toString() {
-        return printInfo("JAVA_HOME: ") + javaPath + "\n" +
-                printInfo("java version: ") + javaVersion + "\n" +
-                printInfo("ANDROID_HOME: ") + sdkPath + "\n" +
+        return printInfo("ANDROID_HOME: ") + sdkPath + "\n" +
                 printInfo("ADB path: ") + adbPath +
                 printInfo("ADB version: ") + adbVersion +
-                printInfo("chromeDriver path: ") + chromeDriverPath + "\n" +
-                printInfo("chromeDriver version: ") + chromeDriverVersion +
-                printInfo("Node path: ") + nodePath +
-                printInfo("Node version: ") + nodeVersion +
-                printInfo("npm path: ") + npmPath +
-                printInfo("npm version: ") + npmVersion +
-                printInfo("adbkit path: ") + adbKitPath +
-                printInfo("adbkit version: ") + adbKitVersion +
-                printInfo("Appium path: ") + appiumPath +
-                printInfo("Appium version: ") + appiumVersion +
                 printInfo("System: ") + system;
     }
 }

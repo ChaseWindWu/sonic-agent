@@ -1,8 +1,9 @@
 name: deploy to Dockerhub
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*.*.*-*"
 
 jobs:
 
@@ -26,6 +27,14 @@ jobs:
         run: ver=${{ steps.previoustag.outputs.tag }} && new_ver=${ver:1} && sed -i "s/SONIC_VERSION/${new_ver}/g" pom.xml
       - name: login docker hub
         run: echo "${{ secrets.ACCESS_TOKEN }}" | docker login -u zhouyixun --password-stdin
+      - name: sas-download
+        uses: robinraju/release-downloader@v1.4
+        with:
+          repository: SonicCloudOrg/sonic-android-supply
+          latest: true
+          fileName: "*_linux_x86_64.tar.gz"
+      - name: sas
+        run: tar zxvf *_linux_x86_64.tar.gz && rm *_linux_x86_64.tar.gz && rm plugins/sonic-android-supply* && mv sas plugins/sonic-android-supply
       - name: sgm-download
         uses: robinraju/release-downloader@v1.4
         with:
@@ -43,7 +52,7 @@ jobs:
       - name: sib
         run: tar zxvf *_linux_x86_64.tar.gz && rm *_linux_x86_64.tar.gz && rm plugins/sonic-ios-bridge* && mv sib plugins/sonic-ios-bridge
       - name: deploy
-        run: mvn package -Plinux-x86_64 && docker build -t sonicorg/sonic-agent-linux:${{ steps.previoustag.outputs.tag }} -f src/main/docker/Dockerfile .
+        run: mvn package -Dplatform=linux-x86_64 && docker build -t sonicorg/sonic-agent-linux:${{ steps.previoustag.outputs.tag }} -f src/main/docker/Dockerfile .
       - name: push
         run: docker push sonicorg/sonic-agent-linux:${{ steps.previoustag.outputs.tag }}
       - name: login docker hub

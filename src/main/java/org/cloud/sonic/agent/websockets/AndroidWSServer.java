@@ -17,36 +17,32 @@
 package org.cloud.sonic.agent.websockets;
 
 import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.JSONArray;
 import com.alibaba.fastjson.JSONObject;
 import com.android.ddmlib.*;
 import org.cloud.sonic.agent.automation.AndroidStepHandler;
-import org.cloud.sonic.agent.automation.AppiumServer;
-import org.cloud.sonic.agent.models.HandleDes;
-import org.cloud.sonic.agent.automation.RemoteDebugDriver;
 import org.cloud.sonic.agent.bridge.android.AndroidDeviceBridgeTool;
 import org.cloud.sonic.agent.bridge.android.AndroidDeviceLocalStatus;
 import org.cloud.sonic.agent.bridge.android.AndroidDeviceThreadPool;
+import org.cloud.sonic.agent.bridge.android.AndroidSupplyTool;
 import org.cloud.sonic.agent.common.config.WsEndpointConfigure;
 import org.cloud.sonic.agent.common.interfaces.DeviceStatus;
 import org.cloud.sonic.agent.common.interfaces.PlatformType;
 import org.cloud.sonic.agent.common.maps.*;
-import org.cloud.sonic.agent.transport.TransportWorker;
+import org.cloud.sonic.agent.common.models.HandleDes;
 import org.cloud.sonic.agent.tests.TaskManager;
 import org.cloud.sonic.agent.tests.android.AndroidRunStepThread;
 import org.cloud.sonic.agent.tools.*;
 import org.cloud.sonic.agent.tools.file.DownloadTool;
 import org.cloud.sonic.agent.tools.file.UploadTools;
-import org.cloud.sonic.agent.tools.poco.PocoTool;
-import org.openqa.selenium.OutputType;
+import org.cloud.sonic.agent.transport.TransportWorker;
+import org.cloud.sonic.driver.common.tool.SonicRespException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestTemplate;
 
+import javax.imageio.stream.FileImageOutputStream;
 import javax.websocket.*;
 import javax.websocket.server.PathParam;
 import javax.websocket.server.ServerEndpoint;
@@ -54,7 +50,10 @@ import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Socket;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
@@ -68,15 +67,8 @@ public class AndroidWSServer implements IAndroidWSServer {
     private String key;
     @Value("${sonic.agent.port}")
     private int port;
-    @Value("${modules.android.use-adbkit}")
-    private boolean isEnableAdbKit;
-    @Value("${modules.appium.enable}")
-    private boolean isEnableAppium;
-    private Map<IDevice, List<JSONObject>> webViewForwardMap = new ConcurrentHashMap<>();
     private Map<Session, OutputStream> outputMap = new ConcurrentHashMap<>();
     private List<Session> NotStopSession = new ArrayList<>();
-    @Autowired
-    private RestTemplate restTemplate;
     @Autowired
     private AgentManagerTool agentManagerTool;
 
@@ -246,38 +238,7 @@ public class AndroidWSServer implements IAndroidWSServer {
 
         AndroidDeviceThreadPool.cachedThreadPool.execute(() -> AndroidDeviceBridgeTool.pushYadb(iDevice));
 
-        if (isEnableAdbKit) {
-            String processName = String.format("process-%s-adbkit", udId);
-            if (GlobalProcessMap.getMap().get(processName) != null) {
-                Process ps = GlobalProcessMap.getMap().get(processName);
-                ps.children().forEach(ProcessHandle::destroy);
-                ps.destroy();
-            }
-            try {
-                String system = System.getProperty("os.name").toLowerCase();
-                Process ps = null;
-                int port = PortTool.getPort();
-                String command = String.format("adbkit usb-device-to-tcp -p %d %s", port, udId);
-                if (system.contains("win")) {
-                    ps = Runtime.getRuntime().exec(new String[]{"cmd", "/c", command});
-                } else if (system.contains("linux") || system.contains("mac")) {
-                    ps = Runtime.getRuntime().exec(new String[]{"sh", "-c", command});
-                }
-                GlobalProcessMap.getMap().put(processName, ps);
-                JSONObject adbkit = new JSONObject();
-                adbkit.put("msg", "adbkit");
-                adbkit.put("isEnable", true);
-                adbkit.put("port", port);
-                BytesTool.sendText(session, adbkit.toJSONString());
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        } else {
-            JSONObject adbkit = new JSONObject();
-            adbkit.put("msg", "adbkit");
-            adbkit.put("isEnable", false);
-            BytesTool.sendText(session, adbkit.toJSONString());
-        }
+        AndroidSupplyTool.startShare(udId, session);
 
         if (isAutoInit == 1) {
             openDriver(iDevice, session);
@@ -310,15 +271,6 @@ public class AndroidWSServer implements IAndroidWSServer {
         logger.info("{} send: {}", session.getId(), msg);
         IDevice iDevice = udIdMap.get(session);
         switch (msg.getString("type")) {
-            case "poco": {
-                AndroidDeviceThreadPool.cachedThreadPool.execute(() -> {
-                    JSONObject poco = new JSONObject();
-                    poco.put("result", PocoTool.getSocketResult(iDevice.getSerialNumber(), PlatformType.ANDROID, msg.getString("detail")));
-                    poco.put("msg", "poco");
-                    BytesTool.sendText(session, poco.toJSONString());
-                });
-                break;
-            }
             case "clearProxy":
                 AndroidDeviceBridgeTool.clearProxy(iDevice);
                 break;
@@ -344,73 +296,8 @@ public class AndroidWSServer implements IAndroidWSServer {
             }
             case "forwardView": {
                 JSONObject forwardView = new JSONObject();
-                List<String> wList = Arrays.asList("webview", "WebView", "chrome_devtools_remote", "Terrace_devtools_remote");
-                List<String> webViewList = new ArrayList<>();
-                for (String w : wList) {
-                    webViewList.addAll(Arrays.asList(AndroidDeviceBridgeTool
-                            .executeCommand(iDevice, "cat /proc/net/unix | grep " + w).split("\n")));
-                }
-                Set<String> webSet = new HashSet<>();
-                for (String w : webViewList) {
-                    if (w.contains("@") && w.indexOf("@") + 1 < w.length()) {
-                        webSet.add(w.substring(w.indexOf("@") + 1));
-                    }
-                }
-                List<JSONObject> has = webViewForwardMap.get(iDevice);
-                if (has != null && has.size() > 0) {
-                    for (JSONObject j : has) {
-                        AndroidDeviceBridgeTool.removeForward(iDevice, j.getInteger("port"), j.getString("name"));
-                    }
-                }
-                has = new ArrayList<>();
-                List<JSONObject> result = new ArrayList<>();
-                if (webViewList.size() > 0) {
-                    HttpHeaders headers = new HttpHeaders();
-                    headers.add("Content-Type", "application/json");
-                    for (String ws : webSet) {
-                        int port = PortTool.getPort();
-                        AndroidDeviceBridgeTool.forward(iDevice, port, ws);
-                        JSONObject j = new JSONObject();
-                        j.put("port", port);
-                        j.put("name", ws);
-                        has.add(j);
-                        JSONObject r = new JSONObject();
-                        r.put("port", port);
-                        try {
-                            ResponseEntity<LinkedHashMap> infoEntity =
-                                    restTemplate.exchange("http://localhost:" + port + "/json/version", HttpMethod.GET, new HttpEntity(headers), LinkedHashMap.class);
-                            if (infoEntity.getStatusCode() == HttpStatus.OK) {
-                                r.put("version", infoEntity.getBody().get("Browser"));
-                                r.put("package", infoEntity.getBody().get("Android-Package"));
-                            }
-                        } catch (Exception e) {
-                            continue;
-                        }
-                        ResponseEntity<JSONArray> responseEntity =
-                                restTemplate.exchange("http://localhost:" + port + "/json/list", HttpMethod.GET, new HttpEntity(headers), JSONArray.class);
-                        if (responseEntity.getStatusCode() == HttpStatus.OK) {
-                            List<JSONObject> child = new ArrayList<>();
-                            for (Object e : responseEntity.getBody()) {
-                                LinkedHashMap objE = (LinkedHashMap) e;
-                                JSONObject c = new JSONObject();
-                                c.put("favicon", objE.get("faviconUrl"));
-                                c.put("title", objE.get("title"));
-                                c.put("url", objE.get("url"));
-                                c.put("id", objE.get("id"));
-                                child.add(c);
-                            }
-                            r.put("children", child);
-                            result.add(r);
-                        }
-                    }
-                    webViewForwardMap.put(iDevice, has);
-                }
                 forwardView.put("msg", "forwardView");
-                if (RemoteDebugDriver.webDriver == null) {
-                    RemoteDebugDriver.startChromeDriver();
-                }
-                forwardView.put("chromePort", RemoteDebugDriver.chromePort);
-                forwardView.put("detail", result);
+                forwardView.put("detail", AndroidDeviceBridgeTool.getWebView(iDevice));
                 BytesTool.sendText(session, forwardView.toJSONString());
                 break;
             }
@@ -485,6 +372,22 @@ public class AndroidWSServer implements IAndroidWSServer {
             case "debug":
                 AndroidStepHandler androidStepHandler = HandlerMap.getAndroidMap().get(session.getId());
                 switch (msg.getString("detail")) {
+                    case "poco": {
+                        AndroidDeviceThreadPool.cachedThreadPool.execute(() -> {
+                            androidStepHandler.startPocoDriver(new HandleDes(), msg.getString("engine"), msg.getInteger("port"));
+                            JSONObject poco = new JSONObject();
+                            try {
+                                poco.put("result", androidStepHandler.getPocoDriver().getPageSourceForJson());
+                            } catch (SonicRespException e) {
+                                poco.put("result", "");
+                                e.printStackTrace();
+                            }
+                            poco.put("msg", "poco");
+                            BytesTool.sendText(session, poco.toJSONString());
+                            androidStepHandler.closePocoDriver(new HandleDes());
+                        });
+                        break;
+                    }
                     case "runStep": {
                         JSONObject jsonDebug = new JSONObject();
                         jsonDebug.put("msg", "findSteps");
@@ -506,8 +409,7 @@ public class AndroidWSServer implements IAndroidWSServer {
                     }
                     case "openApp": {
                         AndroidDeviceThreadPool.cachedThreadPool.execute(() -> {
-                            AndroidDeviceBridgeTool.executeCommand(iDevice,
-                                    String.format("monkey -p %s -c android.intent.category.LAUNCHER 1", msg.getString("pkg")));
+                            AndroidDeviceBridgeTool.activateApp(iDevice, msg.getString("pkg"));
                         });
                         break;
                     }
@@ -540,7 +442,10 @@ public class AndroidWSServer implements IAndroidWSServer {
                             JSONObject result = new JSONObject();
                             result.put("msg", "installFinish");
                             try {
-                                File localFile = DownloadTool.download(msg.getString("apk"));
+                                File localFile = new File(msg.getString("apk"));
+                                if (msg.getString("apk").contains("http")) {
+                                    localFile = DownloadTool.download(msg.getString("apk"));
+                                }
                                 iDevice.installPackage(localFile.getAbsolutePath()
                                         , true, new InstallReceiver(), 180L, 180L, TimeUnit.MINUTES
                                         , "-r", "-t", "-g");
@@ -575,7 +480,7 @@ public class AndroidWSServer implements IAndroidWSServer {
                                         BytesTool.sendText(session, resultFail.toJSONString());
                                     } else {
                                         result.put("webView", finalAndroidStepHandler.getWebView());
-                                        result.put("activity", finalAndroidStepHandler.getCurrentActivity());
+                                        result.put("activity", AndroidDeviceBridgeTool.getCurrentActivity(iDevice));
                                         BytesTool.sendText(session, result.toJSONString());
                                     }
                                 } catch (Throwable e) {
@@ -595,10 +500,22 @@ public class AndroidWSServer implements IAndroidWSServer {
                                 JSONObject result = new JSONObject();
                                 result.put("msg", "eleScreen");
                                 try {
-                                    result.put("img", UploadTools.upload(finalAndroidStepHandler.findEle("xpath", msg.getString("xpath")).getScreenshotAs(OutputType.FILE), "keepFiles"));
+                                    File folder = new File("test-output");
+                                    if (!folder.exists()) {
+                                        folder.mkdirs();
+                                    }
+                                    File output = new File(folder + File.separator + iDevice.getSerialNumber() + Calendar.getInstance().getTimeInMillis() + ".png");
+                                    try {
+                                        byte[] bt = androidStepHandler.findEle("xpath", msg.getString("xpath")).screenshot();
+                                        FileImageOutputStream imageOutput = new FileImageOutputStream(output);
+                                        imageOutput.write(bt, 0, bt.length);
+                                        imageOutput.close();
+                                    } catch (Exception e) {
+                                        e.printStackTrace();
+                                    }
+                                    result.put("img", UploadTools.upload(output, "keepFiles"));
                                 } catch (Exception e) {
                                     result.put("errMsg", "获取元素截图失败！");
-                                    e.printStackTrace();
                                 }
                                 BytesTool.sendText(session, result.toJSONString());
                             });
@@ -611,33 +528,28 @@ public class AndroidWSServer implements IAndroidWSServer {
     }
 
     private void openDriver(IDevice iDevice, Session session) {
-        if (isEnableAppium) {
-            AndroidStepHandler androidStepHandler = new AndroidStepHandler();
-            androidStepHandler.setTestMode(0, 0, iDevice.getSerialNumber(), DeviceStatus.DEBUGGING, session.getId());
-            JSONObject result = new JSONObject();
-            AndroidStepHandler finalAndroidStepHandler1 = androidStepHandler;
-            AndroidDeviceThreadPool.cachedThreadPool.execute(() -> {
-                try {
-                    AndroidDeviceLocalStatus.startDebug(iDevice.getSerialNumber());
-                    finalAndroidStepHandler1.startAndroidDriver(iDevice.getSerialNumber());
-                    result.put("status", "success");
-                    result.put("detail", "初始化Driver完成！");
-                    HandlerMap.getAndroidMap().put(session.getId(), finalAndroidStepHandler1);
-                    JSONObject port = new JSONObject();
-                    port.put("port", AppiumServer.serviceMap.get(iDevice.getSerialNumber()).getUrl().getPort());
-                    port.put("msg", "appiumPort");
-                    BytesTool.sendText(session, port.toJSONString());
-                } catch (Exception e) {
-                    logger.error(e.getMessage());
-                    result.put("status", "error");
-                    result.put("detail", "初始化Driver失败！部分功能不可用！请联系管理员");
-                    finalAndroidStepHandler1.closeAndroidDriver();
-                } finally {
-                    result.put("msg", "openDriver");
-                    BytesTool.sendText(session, result.toJSONString());
-                }
-            });
-        }
+        AndroidStepHandler androidStepHandler = new AndroidStepHandler();
+        androidStepHandler.setTestMode(0, 0, iDevice.getSerialNumber(), DeviceStatus.DEBUGGING, session.getId());
+        JSONObject result = new JSONObject();
+        AndroidStepHandler finalAndroidStepHandler1 = androidStepHandler;
+        AndroidDeviceThreadPool.cachedThreadPool.execute(() -> {
+            try {
+                AndroidDeviceLocalStatus.startDebug(iDevice.getSerialNumber());
+                int port = AndroidDeviceBridgeTool.startUiaServer(iDevice);
+                finalAndroidStepHandler1.startAndroidDriver(iDevice, port);
+                result.put("status", "success");
+                result.put("detail", "初始化Driver完成！");
+                HandlerMap.getAndroidMap().put(session.getId(), finalAndroidStepHandler1);
+            } catch (Exception e) {
+                logger.error(e.getMessage());
+                result.put("status", "error");
+                result.put("detail", "初始化Driver失败！部分功能不可用！请联系管理员");
+                finalAndroidStepHandler1.closeAndroidDriver();
+            } finally {
+                result.put("msg", "openDriver");
+                BytesTool.sendText(session, result.toJSONString());
+            }
+        });
     }
 
     private void exit(Session session) {
@@ -656,21 +568,8 @@ public class AndroidWSServer implements IAndroidWSServer {
         if (iDevice != null) {
             AndroidDeviceBridgeTool.executeCommand(iDevice, "am force-stop org.cloud.sonic.android");
             AndroidDeviceBridgeTool.clearProxy(iDevice);
-            List<JSONObject> has = webViewForwardMap.get(iDevice);
-            if (has != null && has.size() > 0) {
-                for (JSONObject j : has) {
-                    AndroidDeviceBridgeTool.removeForward(iDevice, j.getInteger("port"), j.getString("name"));
-                }
-            }
-            webViewForwardMap.remove(iDevice);
-            if (isEnableAdbKit) {
-                String processName = String.format("process-%s-adbkit", iDevice.getSerialNumber());
-                if (GlobalProcessMap.getMap().get(processName) != null) {
-                    Process ps = GlobalProcessMap.getMap().get(processName);
-                    ps.children().forEach(ProcessHandle::destroy);
-                    ps.destroy();
-                }
-            }
+            AndroidDeviceBridgeTool.clearWebView(iDevice);
+            AndroidSupplyTool.stopShare(iDevice.getSerialNumber());
             SGMTool.stopProxy(iDevice.getSerialNumber());
             AndroidAPKMap.getMap().remove(iDevice.getSerialNumber());
         }
